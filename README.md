@@ -19,3 +19,6 @@ Scrapy based Ad scraper from https://www.pakwheels.com/
 - Features
 - Last Updated
 - URL
+
+
+## Installation
