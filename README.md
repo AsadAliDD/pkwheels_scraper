@@ -1,5 +1,5 @@
 # pkwheels_scraper
-Scrapy based Ad scraper from [pakwheels.com]
+Scrapy based Ad scraper from https://www.pakwheels.com/
 
 ## Scraped Fields
 
