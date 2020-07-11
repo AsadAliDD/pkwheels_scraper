@@ -14,7 +14,9 @@ class Pak1Spider(scrapy.Spider):
 
         # Next Page
         next_page=response.xpath('//li[@class="next_page"]/a/@href').extract_first()
-        pass
+        if (next_page):
+            comp_url='https://www.pakwheels.com'+next_page
+            yield scrapy.Request(comp_url, callback=self.parse)
 
 
 
