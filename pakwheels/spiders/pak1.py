@@ -29,6 +29,7 @@ class Pak1Spider(scrapy.Spider):
         # Price
         price=response.xpath('//div[@class="price-box"]/strong/text()').extract_first()
         unit=response.xpath('//div[@class="price-box"]/strong/span/text()').extract_first()
+        
         if (unit=='lacs'):
             price=float(price.strip().split('PKR')[1])*100000 
         elif (unit=='crore'):
