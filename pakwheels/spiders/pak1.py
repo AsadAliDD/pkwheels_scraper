@@ -29,6 +29,7 @@ class Pak1Spider(scrapy.Spider):
         # Price
         price=response.xpath('//div[@class="price-box"]/strong/text()').extract_first()
         unit=response.xpath('//div[@class="price-box"]/strong/span/text()').extract_first()
+        
         if (unit=='lacs'):
             price=float(price.strip().split('PKR')[1])*100000 
         elif (unit=='crore'):
@@ -38,7 +39,7 @@ class Pak1Spider(scrapy.Spider):
         year=int(response.xpath('//span[@class="engine-icon year"]/../p/a/text()').extract_first())
 
         # Ad Location
-        location=response.xpath('//i[@class="fa fa-map-marker"]/../text()').extract_first() 
+        location=response.xpath('//*[@id="scroll_car_info"]/p/a/text()').extract_first() 
 
         # mileage
         mileage=response.xpath('//span[@class="engine-icon millage"]/../p/text()').extract_first()   
@@ -54,7 +55,7 @@ class Pak1Spider(scrapy.Spider):
             transmission=response.xpath('//span[@class="engine-icon transmission"]/../p/text()').extract_first() 
 
         # Registered City
-        register_city=response.xpath("//*[contains(text(),'Registered City')]/following-sibling::li/text()").extract_first() 
+        register_city=response.xpath('//*[@id="scroll_car_detail"]/li[2]/text()').extract_first() 
 
         # Color
         color=response.xpath("//*[contains(text(),'Color')]/following-sibling::li/text()").extract_first() 
