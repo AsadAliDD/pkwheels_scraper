@@ -18,6 +18,8 @@ NEWSPIDER_MODULE = 'pakwheels.spiders'
 FEED_EXPORT_FIELDS = ["Ad No",
                     "Name",
                     "Price",
+                    "Make",
+                    "Model",
                     "Model Year",
                     "Location",
                     "Mileage",

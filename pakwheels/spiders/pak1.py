@@ -38,6 +38,15 @@ class Pak1Spider(scrapy.Spider):
         # Model Year
         year=int(response.xpath('//span[@class="engine-icon year"]/../p/a/text()').extract_first())
 
+        # Make and Model
+        make=response.xpath("//*[normalize-space(text())='Make']/following-sibling::li/a/text()").extract_first()
+        if (make is None):
+            make=response.xpath("//*[normalize-space(text())='Make']/following-sibling::li/text()").extract_first()
+
+        model=response.xpath("//*[normalize-space(text())='Model']/following-sibling::li/a/text()").extract_first()
+        if (model is None):
+            model=response.xpath("//*[normalize-space(text())='Model']/following-sibling::li/text()").extract_first()
+
         # Ad Location
         location=response.xpath('//*[@id="scroll_car_info"]/p/a/text()').extract_first() 
 
@@ -89,6 +98,8 @@ class Pak1Spider(scrapy.Spider):
                 "Ad No":    ref_no,
                 "Name":     name,
                 "Price":    price,
+                "Make":     make,
+                "Model":    model,
                 "Model Year": year,
                 "Location": location,
                 "Mileage": mileage,
