@@ -1,6 +1,6 @@
 from copy import deepcopy
 
-import psycopg
+from mysql.connector import errors as mysql_errors
 import pytest
 
 from pakwheels.pipelines import FIELDS, PakwheelsPipeline
@@ -98,7 +98,7 @@ class ReconciliationPipeline(PakwheelsPipeline):
 
 
 class MemoryPipeline(PakwheelsPipeline):
-    """Exercise ingestion decisions without requiring a PostgreSQL server."""
+    """Exercise ingestion decisions without requiring a MySQL server."""
 
     def __init__(self):
         super().__init__('unused', max_retries=2, retry_delay=0)
@@ -111,7 +111,7 @@ class MemoryPipeline(PakwheelsPipeline):
     def _store(self, values):
         if self.fail_once:
             self.fail_once = False
-            raise psycopg.OperationalError('temporary failure')
+            raise mysql_errors.OperationalError('temporary failure')
         key = values['source_listing_id']
         digest = self.content_hash(values)
         old = self.rows.get(key)
@@ -215,3 +215,20 @@ def test_seen_listing_resets_misses_and_reactivates():
     pipeline = ReconciliationPipeline([listing])
     pipeline.close_spider(Spider())
     assert listing == {'seen': True, 'misses': 0, 'active': True}
+
+
+def test_mysql_url_is_converted_to_connector_options():
+    assert PakwheelsPipeline._connection_config(
+        'mysql://scraper:p%40ss@localhost:3307/pakwheels?ssl_disabled=true'
+    ) == {
+        'host': 'localhost', 'port': 3307, 'database': 'pakwheels',
+        'charset': 'utf8mb4', 'user': 'scraper', 'password': 'p@ss',
+        'ssl_disabled': 'true',
+    }
+
+
+def test_json_features_returned_by_mysql_are_normalized():
+    normalized = PakwheelsPipeline._normalize({
+        **BASE_ITEM, 'features': '["Air Bags", "ABS"]',
+    })
+    assert normalized['features'] == ['ABS', 'Air Bags']
