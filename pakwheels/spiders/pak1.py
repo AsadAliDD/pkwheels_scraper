@@ -6,6 +6,25 @@ class Pak1Spider(scrapy.Spider):
     allowed_domains = ['pakwheels.com']
     start_urls = ['https://www.pakwheels.com/used-cars/search/-/']
 
+    def __init__(self, pages=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        if pages is None:
+            self.max_pages = None
+            return
+
+        try:
+            self.max_pages = int(pages)
+        except (TypeError, ValueError):
+            raise ValueError('pages must be a positive integer') from None
+
+        if self.max_pages < 1:
+            raise ValueError('pages must be a positive integer')
+
+    def start_requests(self):
+        for url in self.start_urls:
+            yield scrapy.Request(url, callback=self.parse, meta={'page_number': 1})
+
     @staticmethod
     def variant_from_name(name, make, model, year):
         """Return the trim/variant portion of a listing name."""
@@ -27,9 +46,14 @@ class Pak1Spider(scrapy.Spider):
 
         # Next Page
         next_page=response.xpath('//li[@class="next_page"]/a/@href').extract_first()
-        if (next_page):
+        page_number = response.meta.get('page_number', 1)
+        if next_page and (self.max_pages is None or page_number < self.max_pages):
             comp_url='https://www.pakwheels.com'+next_page
-            yield scrapy.Request(comp_url, callback=self.parse)
+            yield scrapy.Request(
+                comp_url,
+                callback=self.parse,
+                meta={'page_number': page_number + 1},
+            )
 
 
 

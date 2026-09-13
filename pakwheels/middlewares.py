@@ -3,10 +3,36 @@
 # See documentation in:
 # https://docs.scrapy.org/en/latest/topics/spider-middleware.html
 
+import random
+
 from scrapy import signals
 
 # useful for handling different item types with a single interface
 from itemadapter import is_item, ItemAdapter
+
+
+class RandomUserAgentMiddleware:
+    """Select a browser user agent independently for every request."""
+
+    USER_AGENTS = (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/128.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+        'AppleWebKit/605.1.15 (KHTML, like Gecko) '
+        'Version/17.6 Safari/605.1.15',
+        'Mozilla/5.0 (X11; Linux x86_64; rv:129.0) '
+        'Gecko/20100101 Firefox/129.0',
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) '
+        'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 '
+        'Mobile/15E148 Safari/604.1',
+        'Mozilla/5.0 (Linux; Android 14; Pixel 8) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/128.0.0.0 Mobile Safari/537.36',
+    )
+
+    def process_request(self, request, spider):
+        request.headers['User-Agent'] = random.choice(self.USER_AGENTS)
 
 
 class PakwheelsSpiderMiddleware:
