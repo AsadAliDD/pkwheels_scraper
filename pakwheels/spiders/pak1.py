@@ -16,6 +16,9 @@ class Pak1Spider(scrapy.Spider):
 
     def __init__(self, pages=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.is_full_crawl = pages is None
+        self.requested_pages = None
+        self.crawl_complete = False
 
         if pages is None:
             self.max_pages = None
@@ -28,10 +31,17 @@ class Pak1Spider(scrapy.Spider):
 
         if self.max_pages < 1:
             raise ValueError('pages must be a positive integer')
+        self.requested_pages = self.max_pages
 
     def start_requests(self):
         for url in self.start_urls:
-            yield scrapy.Request(url, callback=self.parse, meta={'page_number': 1})
+            yield scrapy.Request(url, callback=self.parse, errback=self.request_failed,
+                                 meta={'page_number': 1})
+
+    def request_failed(self, failure):
+        """Record any failed result or detail request for run reconciliation."""
+        self.crawler.stats.inc_value('requests_failed')
+        self.logger.warning('Request failed: %s', failure)
 
     @staticmethod
     def variant_from_name(name, make, model, year):
@@ -47,10 +57,12 @@ class Pak1Spider(scrapy.Spider):
         return None
 
     def parse(self, response):
+        self.crawler.stats.inc_value('pages_scraped')
         urls=response.xpath('//div[@class="search-title"]/a/@href').extract()
         for url in urls:
             comp_url='https://www.pakwheels.com'+url
-            yield scrapy.Request(comp_url, callback=self.parse_car)
+            yield scrapy.Request(comp_url, callback=self.parse_car,
+                                 errback=self.request_failed)
 
         # Next Page
         next_page=response.xpath('//li[@class="next_page"]/a/@href').extract_first()
@@ -60,8 +72,13 @@ class Pak1Spider(scrapy.Spider):
             yield scrapy.Request(
                 comp_url,
                 callback=self.parse,
+                errback=self.request_failed,
                 meta={'page_number': page_number + 1},
             )
+        elif self.is_full_crawl and not next_page:
+            # Reaching the natural end, rather than an operator-supplied page
+            # limit, is required before missing listings can be reconciled.
+            self.crawl_complete = True
 
 
 

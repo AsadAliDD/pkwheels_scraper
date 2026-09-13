@@ -76,6 +76,8 @@ ITEM_PIPELINES = {
 DATABASE_CONNECT_TIMEOUT = 10
 DATABASE_MAX_RETRIES = 3
 DATABASE_RETRY_DELAY = 0.25
+# Listings are retired only after this many consecutive successful full crawls.
+LISTING_INACTIVE_MISS_THRESHOLD = 3
 
 # Enable and configure the AutoThrottle extension (disabled by default)
 # See https://docs.scrapy.org/en/latest/topics/autothrottle.html
