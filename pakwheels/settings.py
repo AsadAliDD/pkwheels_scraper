@@ -72,7 +72,7 @@ ITEM_PIPELINES = {
     'pakwheels.pipelines.PakwheelsPipeline': 300,
 }
 
-# DATABASE_URL is intentionally read from the environment by the pipeline.
+# The mysql:// DATABASE_URL is intentionally read from the environment.
 DATABASE_CONNECT_TIMEOUT = 10
 DATABASE_MAX_RETRIES = 3
 DATABASE_RETRY_DELAY = 0.25

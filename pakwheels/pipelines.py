@@ -1,4 +1,4 @@
-"""Transactional PostgreSQL persistence for PakWheels listings."""
+"""Transactional MySQL persistence for PakWheels listings."""
 
 import hashlib
 import json
@@ -6,10 +6,11 @@ import os
 import time
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from urllib.parse import parse_qsl, unquote, urlparse
 
-import psycopg
+import mysql.connector
 from itemadapter import ItemAdapter
-from psycopg.types.json import Jsonb
+from mysql.connector import errors as mysql_errors
 from scrapy.exceptions import NotConfigured
 
 
@@ -26,7 +27,7 @@ class PakwheelsPipeline:
     """Maintain current listings and append-only versions and price history."""
 
     def __init__(self, database_url, connect_timeout=10, max_retries=3,
-                 retry_delay=0.25, connect=psycopg.connect, miss_threshold=3):
+                 retry_delay=0.25, connect=mysql.connector.connect, miss_threshold=3):
         self.database_url = database_url
         self.connect_timeout = connect_timeout
         self.max_retries = max(1, max_retries)
@@ -53,17 +54,18 @@ class PakwheelsPipeline:
         )
 
     def open_spider(self, spider):
-        self.connection = self.connect(
-            self.database_url, connect_timeout=self.connect_timeout,
-        )
+        config = self._connection_config(self.database_url)
+        config['connection_timeout'] = self.connect_timeout
+        self.connection = self.connect(**config)
         with self.connection.cursor() as cursor:
+            cursor.execute("SET time_zone = '+00:00'")
             cursor.execute(
                 """INSERT INTO scrape_runs
                    (spider_name, status, is_full_crawl, requested_pages)
-                   VALUES (%s, 'running', %s, %s) RETURNING id""",
+                   VALUES (%s, 'running', %s, %s)""",
                 (spider.name, spider.is_full_crawl, spider.requested_pages),
             )
-            self.run_id = cursor.fetchone()[0]
+            self.run_id = cursor.lastrowid
         self.connection.commit()
 
     def process_item(self, item, spider):
@@ -81,9 +83,11 @@ class PakwheelsPipeline:
                 elif outcome == 'changed':
                     self.items_changed += 1
                 return item
-            except (psycopg.OperationalError, psycopg.errors.SerializationFailure,
-                    psycopg.errors.DeadlockDetected) as error:
+            except (mysql_errors.OperationalError, mysql_errors.InternalError) as error:
                 self.connection.rollback()
+                if not self._is_retryable(error):
+                    self.terminal_error = str(error)
+                    raise
                 if attempt + 1 == self.max_retries:
                     self.terminal_error = str(error)
                     raise
@@ -94,7 +98,7 @@ class PakwheelsPipeline:
                 raise
 
     def _store(self, values):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         content_hash = self.content_hash(values)
         columns = ', '.join(FIELDS)
         placeholders = ', '.join(['%s'] * len(FIELDS))
@@ -105,14 +109,12 @@ class PakwheelsPipeline:
                     (source, source_listing_id, url, {columns}, first_seen_at,
                      last_seen_at, last_seen_run_id, content_hash, is_active)
                     VALUES ('pakwheels', %s, %s, {placeholders}, %s, %s, %s, %s, true)
-                    ON CONFLICT (source, source_listing_id) DO NOTHING
-                    RETURNING id""",
+                    ON DUPLICATE KEY UPDATE id=id""",
                 (values['source_listing_id'], values['url'], *field_values,
                  now, now, self.run_id, content_hash),
             )
-            inserted = cursor.fetchone()
-            if inserted:
-                listing_id = inserted[0]
+            if cursor.rowcount == 1:
+                listing_id = cursor.lastrowid
                 self._insert_version(cursor, listing_id, values, content_hash,
                                      ['url', *FIELDS], now)
                 cursor.execute(
@@ -171,9 +173,10 @@ class PakwheelsPipeline:
                 (listing_id, scrape_run_id, observed_at, url, {columns},
                  content_hash, changed_fields)
                 VALUES (%s, %s, %s, %s, {placeholders}, %s, %s)
-                ON CONFLICT (listing_id, content_hash) DO NOTHING""",
+                ON DUPLICATE KEY UPDATE id=id""",
             (listing_id, self.run_id, observed_at, values['url'],
-             *self._db_field_values(values), content_hash, Jsonb(changed_fields)),
+             *self._db_field_values(values), content_hash,
+             json.dumps(changed_fields, ensure_ascii=False)),
         )
 
     @staticmethod
@@ -183,7 +186,11 @@ class PakwheelsPipeline:
             value = raw.get(key)
             if key == 'features':
                 if isinstance(value, str):
-                    value = value.split(',')
+                    try:
+                        decoded = json.loads(value)
+                        value = decoded if isinstance(decoded, list) else value.split(',')
+                    except json.JSONDecodeError:
+                        value = value.split(',')
                 result[key] = sorted({str(v).strip() for v in (value or [])
                                       if v is not None and str(v).strip()}, key=str.casefold)
             elif key in INTEGER_FIELDS:
@@ -217,8 +224,33 @@ class PakwheelsPipeline:
 
     @staticmethod
     def _db_field_values(values):
-        return tuple(Jsonb(values[field]) if field == 'features' else values[field]
+        return tuple(json.dumps(values[field], ensure_ascii=False)
+                     if field == 'features' else values[field]
                      for field in FIELDS)
+
+    @staticmethod
+    def _connection_config(database_url):
+        parsed = urlparse(database_url)
+        if parsed.scheme not in ('mysql', 'mysql+mysqlconnector'):
+            raise ValueError('DATABASE_URL must use the mysql:// scheme')
+        if not parsed.hostname or not parsed.path.strip('/'):
+            raise ValueError('DATABASE_URL must include a host and database name')
+        config = {
+            'host': parsed.hostname,
+            'port': parsed.port or 3306,
+            'database': unquote(parsed.path.lstrip('/')),
+            'charset': 'utf8mb4',
+        }
+        if parsed.username is not None:
+            config['user'] = unquote(parsed.username)
+        if parsed.password is not None:
+            config['password'] = unquote(parsed.password)
+        config.update(dict(parse_qsl(parsed.query)))
+        return config
+
+    @staticmethod
+    def _is_retryable(error):
+        return getattr(error, 'errno', None) in (None, 1205, 1213)
 
     def close_spider(self, spider):
         if self.connection is None:
@@ -271,6 +303,6 @@ class PakwheelsPipeline:
                            THEN COALESCE(inactive_at, now())
                        ELSE inactive_at END
                WHERE source = 'pakwheels'
-                 AND last_seen_run_id IS DISTINCT FROM %s""",
+                 AND NOT (last_seen_run_id <=> %s)""",
             (self.miss_threshold, self.miss_threshold, self.run_id),
         )
