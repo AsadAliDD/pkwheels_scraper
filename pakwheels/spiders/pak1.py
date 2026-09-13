@@ -6,6 +6,19 @@ class Pak1Spider(scrapy.Spider):
     allowed_domains = ['pakwheels.com']
     start_urls = ['https://www.pakwheels.com/used-cars/search/-/']
 
+    @staticmethod
+    def variant_from_name(name, make, model, year):
+        """Return the trim/variant portion of a listing name."""
+        if not all((name, make, model, year)):
+            return None
+
+        prefix = '{} {} '.format(make.strip(), model.strip())
+        year_suffix = ' {}'.format(year)
+        if name.startswith(prefix) and name.endswith(year_suffix):
+            return name[len(prefix):-len(year_suffix)].strip() or None
+
+        return None
+
     def parse(self, response):
         urls=response.xpath('//div[@class="search-title"]/a/@href').extract()
         for url in urls:
@@ -37,6 +50,23 @@ class Pak1Spider(scrapy.Spider):
         
         # Model Year
         year=int(response.xpath('//span[@class="engine-icon year"]/../p/a/text()').extract_first())
+
+        # Make and Model
+        make=response.xpath("//*[normalize-space(text())='Make']/following-sibling::li/a/text()").extract_first()
+        if (make is None):
+            make=response.xpath("//*[normalize-space(text())='Make']/following-sibling::li/text()").extract_first()
+
+        model=response.xpath("//*[normalize-space(text())='Model']/following-sibling::li/a/text()").extract_first()
+        if (model is None):
+            model=response.xpath("//*[normalize-space(text())='Model']/following-sibling::li/text()").extract_first()
+
+        # Variant (also called the version or trim)
+        variant=response.xpath(
+            "(//*[normalize-space(text())='Variant' or normalize-space(text())='Version']"
+            "/following-sibling::li[1]//text())[1]"
+        ).extract_first()
+        if (variant is None):
+            variant=self.variant_from_name(name, make, model, year)
 
         # Ad Location
         location=response.xpath('//*[@id="scroll_car_info"]/p/a/text()').extract_first() 
@@ -89,6 +119,9 @@ class Pak1Spider(scrapy.Spider):
                 "Ad No":    ref_no,
                 "Name":     name,
                 "Price":    price,
+                "Make":     make,
+                "Model":    model,
+                "Variant":  variant,
                 "Model Year": year,
                 "Location": location,
                 "Mileage": mileage,

@@ -7,6 +7,9 @@ Scrapy based Ad scraper from https://www.pakwheels.com/
 - Ad Ref No.
 - Name
 - Price
+- Make
+- Model
+- Variant (version/trim, for example `VTi Prosmatec 1.8 i-VTEC`)
 - Model Year
 - Location
 - Mileage
