@@ -1,13 +1,237 @@
-# Define your item pipelines here
-#
-# Don't forget to add your pipeline to the ITEM_PIPELINES setting
-# See: https://docs.scrapy.org/en/latest/topics/item-pipeline.html
+"""Transactional PostgreSQL persistence for PakWheels listings."""
 
+import hashlib
+import json
+import os
+import time
+from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
-# useful for handling different item types with a single interface
+import psycopg
 from itemadapter import ItemAdapter
+from psycopg.types.json import Jsonb
+from scrapy.exceptions import NotConfigured
+
+
+FIELDS = (
+    'name', 'price_pkr', 'make', 'model', 'model_year', 'location',
+    'mileage_km', 'registered_city', 'engine_type', 'engine_capacity_cc',
+    'transmission', 'color', 'assembly', 'body_type', 'features',
+    'source_updated_at',
+)
+INTEGER_FIELDS = {'price_pkr', 'model_year', 'mileage_km', 'engine_capacity_cc'}
 
 
 class PakwheelsPipeline:
+    """Maintain current listings and append-only versions and price history."""
+
+    def __init__(self, database_url, connect_timeout=10, max_retries=3,
+                 retry_delay=0.25, connect=psycopg.connect):
+        self.database_url = database_url
+        self.connect_timeout = connect_timeout
+        self.max_retries = max(1, max_retries)
+        self.retry_delay = max(0, retry_delay)
+        self.connect = connect
+        self.connection = None
+        self.run_id = None
+        self.items_seen = self.items_inserted = self.items_changed = 0
+        self.terminal_error = None
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        database_url = os.environ.get('DATABASE_URL')
+        if not database_url:
+            raise NotConfigured('DATABASE_URL is required for PakwheelsPipeline')
+        settings = crawler.settings
+        return cls(
+            database_url,
+            settings.getint('DATABASE_CONNECT_TIMEOUT', 10),
+            settings.getint('DATABASE_MAX_RETRIES', 3),
+            settings.getfloat('DATABASE_RETRY_DELAY', 0.25),
+        )
+
+    def open_spider(self, spider):
+        self.connection = self.connect(
+            self.database_url, connect_timeout=self.connect_timeout,
+        )
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO scrape_runs (spider_name, status) "
+                "VALUES (%s, 'running') RETURNING id", (spider.name,),
+            )
+            self.run_id = cursor.fetchone()[0]
+        self.connection.commit()
+
     def process_item(self, item, spider):
-        return item
+        values = self._normalize(ItemAdapter(item).asdict())
+        if not values['source_listing_id'] or not values['url']:
+            raise ValueError('source_listing_id and url are required')
+        self.items_seen += 1
+
+        for attempt in range(self.max_retries):
+            try:
+                outcome = self._store(values)
+                self.connection.commit()
+                if outcome == 'inserted':
+                    self.items_inserted += 1
+                elif outcome == 'changed':
+                    self.items_changed += 1
+                return item
+            except (psycopg.OperationalError, psycopg.errors.SerializationFailure,
+                    psycopg.errors.DeadlockDetected) as error:
+                self.connection.rollback()
+                if attempt + 1 == self.max_retries:
+                    self.terminal_error = str(error)
+                    raise
+                time.sleep(self.retry_delay * (2 ** attempt))
+            except Exception as error:
+                self.connection.rollback()
+                self.terminal_error = str(error)
+                raise
+
+    def _store(self, values):
+        now = datetime.now(timezone.utc)
+        content_hash = self.content_hash(values)
+        columns = ', '.join(FIELDS)
+        placeholders = ', '.join(['%s'] * len(FIELDS))
+        field_values = self._db_field_values(values)
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                f"""INSERT INTO listings
+                    (source, source_listing_id, url, {columns}, first_seen_at,
+                     last_seen_at, last_seen_run_id, content_hash, is_active)
+                    VALUES ('pakwheels', %s, %s, {placeholders}, %s, %s, %s, %s, true)
+                    ON CONFLICT (source, source_listing_id) DO NOTHING
+                    RETURNING id""",
+                (values['source_listing_id'], values['url'], *field_values,
+                 now, now, self.run_id, content_hash),
+            )
+            inserted = cursor.fetchone()
+            if inserted:
+                listing_id = inserted[0]
+                self._insert_version(cursor, listing_id, values, content_hash,
+                                     ['url', *FIELDS], now)
+                cursor.execute(
+                    """INSERT INTO price_history
+                       (listing_id, scrape_run_id, observed_at, old_price_pkr, new_price_pkr)
+                       VALUES (%s, %s, %s, NULL, %s)""",
+                    (listing_id, self.run_id, now, values['price_pkr']),
+                )
+                return 'inserted'
+
+            cursor.execute(
+                f"""SELECT id, content_hash, {columns}
+                    FROM listings WHERE source = 'pakwheels'
+                    AND source_listing_id = %s FOR UPDATE""",
+                (values['source_listing_id'],),
+            )
+            row = cursor.fetchone()
+            listing_id, old_hash = row[0], row[1]
+            if old_hash == content_hash:
+                cursor.execute(
+                    """UPDATE listings SET last_seen_at=%s, last_seen_run_id=%s,
+                       url=%s, is_active=true, inactive_at=NULL WHERE id=%s""",
+                    (now, self.run_id, values['url'], listing_id),
+                )
+                return 'unchanged'
+
+            old = dict(zip(FIELDS, row[2:]))
+            old = self._normalize({'source_listing_id': values['source_listing_id'],
+                                   'url': values['url'], **old})
+            changed = [field for field in FIELDS if old[field] != values[field]]
+            self._insert_version(cursor, listing_id, values, content_hash, changed, now)
+            if 'price_pkr' in changed:
+                cursor.execute(
+                    """INSERT INTO price_history
+                       (listing_id, scrape_run_id, observed_at, old_price_pkr, new_price_pkr)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (listing_id, self.run_id, now, old['price_pkr'], values['price_pkr']),
+                )
+            assignments = ', '.join(f'{field}=%s' for field in FIELDS)
+            cursor.execute(
+                f"""UPDATE listings SET url=%s, {assignments}, last_seen_at=%s,
+                    last_seen_run_id=%s, content_hash=%s, is_active=true,
+                    inactive_at=NULL WHERE id=%s""",
+                (values['url'], *field_values, now, self.run_id, content_hash,
+                 listing_id),
+            )
+            return 'changed'
+
+    def _insert_version(self, cursor, listing_id, values, content_hash,
+                        changed_fields, observed_at):
+        columns = ', '.join(FIELDS)
+        placeholders = ', '.join(['%s'] * len(FIELDS))
+        cursor.execute(
+            f"""INSERT INTO listing_versions
+                (listing_id, scrape_run_id, observed_at, url, {columns},
+                 content_hash, changed_fields)
+                VALUES (%s, %s, %s, %s, {placeholders}, %s, %s)
+                ON CONFLICT (listing_id, content_hash) DO NOTHING""",
+            (listing_id, self.run_id, observed_at, values['url'],
+             *self._db_field_values(values), content_hash, Jsonb(changed_fields)),
+        )
+
+    @staticmethod
+    def _normalize(raw):
+        result = {}
+        for key in ('source_listing_id', 'url', *FIELDS):
+            value = raw.get(key)
+            if key == 'features':
+                if isinstance(value, str):
+                    value = value.split(',')
+                result[key] = sorted({str(v).strip() for v in (value or [])
+                                      if v is not None and str(v).strip()}, key=str.casefold)
+            elif key in INTEGER_FIELDS:
+                if value in (None, ''):
+                    result[key] = None
+                else:
+                    try:
+                        result[key] = int(Decimal(str(value).strip()).quantize(
+                            Decimal('1'), rounding=ROUND_HALF_UP))
+                    except (InvalidOperation, ValueError):
+                        result[key] = None
+            elif key == 'source_updated_at':
+                result[key] = value.date() if isinstance(value, datetime) else value
+                if result[key] and not isinstance(result[key], date):
+                    try:
+                        result[key] = date.fromisoformat(str(result[key]).strip())
+                    except ValueError:
+                        result[key] = None
+            else:
+                result[key] = str(value).strip() or None if value is not None else None
+        return result
+
+    @staticmethod
+    def content_hash(values):
+        payload = {field: (values[field].isoformat()
+                           if isinstance(values[field], date) else values[field])
+                   for field in FIELDS}
+        encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'),
+                             ensure_ascii=False).encode('utf-8')
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _db_field_values(values):
+        return tuple(Jsonb(values[field]) if field == 'features' else values[field]
+                     for field in FIELDS)
+
+    def close_spider(self, spider):
+        if self.connection is None:
+            return
+        reason = getattr(spider, 'crawler', None)
+        reason = getattr(getattr(reason, 'stats', None), 'get_value', lambda *a: None)(
+            'finish_reason')
+        failed = bool(self.terminal_error) or reason not in (None, 'finished')
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """UPDATE scrape_runs SET finished_at=now(), status=%s,
+                       items_seen=%s, items_inserted=%s, items_changed=%s,
+                       error_message=%s WHERE id=%s""",
+                    ('failed' if failed else 'succeeded', self.items_seen,
+                     self.items_inserted, self.items_changed,
+                     self.terminal_error or (reason if failed else None), self.run_id),
+                )
+            self.connection.commit()
+        finally:
+            self.connection.close()

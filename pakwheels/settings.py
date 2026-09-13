@@ -15,24 +15,11 @@ NEWSPIDER_MODULE = 'pakwheels.spiders'
 
 # Crawl responsibly by identifying yourself (and your website) on the user-agent
 #USER_AGENT = 'pakwheels (+http://www.yourdomain.com)'
-FEED_EXPORT_FIELDS = ["Ad No",
-                    "Name",
-                    "Price",
-                    "Make",
-                    "Model",
-                    "Model Year",
-                    "Location",
-                    "Mileage",
-                    "Registered City",
-                    "Engine Type",
-                    "Engine Capacity",
-                    "Transmission",
-                    "Color",
-                    "Assembly",
-                    "Body Type",
-                    "Features",
-                    "Last Updated",
-                    "URL"]
+FEED_EXPORT_FIELDS = ["source_listing_id", "name", "price_pkr", "make",
+                      "model", "model_year", "location", "mileage_km",
+                      "registered_city", "engine_type", "engine_capacity_cc",
+                      "transmission", "color", "assembly", "body_type",
+                      "features", "source_updated_at", "url"]
 
 # Obey robots.txt rules
 # ROBOTSTXT_OBEY = True
@@ -81,9 +68,14 @@ DOWNLOADER_MIDDLEWARES = {
 
 # Configure item pipelines
 # See https://docs.scrapy.org/en/latest/topics/item-pipeline.html
-#ITEM_PIPELINES = {
-#    'pakwheels.pipelines.PakwheelsPipeline': 300,
-#}
+ITEM_PIPELINES = {
+    'pakwheels.pipelines.PakwheelsPipeline': 300,
+}
+
+# DATABASE_URL is intentionally read from the environment by the pipeline.
+DATABASE_CONNECT_TIMEOUT = 10
+DATABASE_MAX_RETRIES = 3
+DATABASE_RETRY_DELAY = 0.25
 
 # Enable and configure the AutoThrottle extension (disabled by default)
 # See https://docs.scrapy.org/en/latest/topics/autothrottle.html
