@@ -51,4 +51,4 @@ log_file="${LOG_DIR}/scrape-${timestamp}.log"
 
 # exec preserves Scrapy's exit status for cron while sending both streams to a
 # timestamped file. No feed-export arguments are intentionally supplied.
-exec "${SCRAPY}" crawl pak1 >>"${log_file}" 2>&1
+exec "${SCRAPY}" crawl pak1 -a pages=10 >>"${log_file}" 2>&1
