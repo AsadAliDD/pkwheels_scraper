@@ -1,4 +1,12 @@
+import re
+from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from urllib.parse import urlsplit
+
 import scrapy
+from scrapy.exceptions import DropItem
+
+from pakwheels.items import PakwheelsItem
 
 
 class Pak1Spider(scrapy.Spider):
@@ -58,96 +66,131 @@ class Pak1Spider(scrapy.Spider):
 
 
     def parse_car(self,response):
-        
+        def text(xpath):
+            value = response.xpath(xpath).extract_first()
+            if value is None:
+                return None
+            value = value.strip()
+            return value or None
+
+        def integer(value):
+            if not value:
+                return None
+            match = re.search(r"[\d,]+", value)
+            return int(match.group().replace(',', '')) if match else None
+
         # Name tag of AD
-        name=response.xpath('//h1/text()').extract_first()  
+        name=text('//h1/text()')
         
         url=response.request.url
         # Price
-        price=response.xpath('//div[@class="price-box"]/strong/text()').extract_first()
-        unit=response.xpath('//div[@class="price-box"]/strong/span/text()').extract_first()
-        
-        if (unit=='lacs'):
-            price=float(price.strip().split('PKR')[1])*100000 
-        elif (unit=='crore'):
-            price=float(price.strip().split('PKR')[1])*10000000
+        price = self.parse_price(
+            text('//div[@class="price-box"]/strong/text()'),
+            text('//div[@class="price-box"]/strong/span/text()'),
+        )
         
         # Model Year
-        year=int(response.xpath('//span[@class="engine-icon year"]/../p/a/text()').extract_first())
+        year=integer(text('//span[@class="engine-icon year"]/../p/a/text()'))
 
         # Make and Model
-        make=response.xpath("//*[normalize-space(text())='Make']/following-sibling::li/a/text()").extract_first()
+        make=text("//*[normalize-space(text())='Make']/following-sibling::li/a/text()")
         if (make is None):
-            make=response.xpath("//*[normalize-space(text())='Make']/following-sibling::li/text()").extract_first()
+            make=text("//*[normalize-space(text())='Make']/following-sibling::li/text()")
 
-        model=response.xpath("//*[normalize-space(text())='Model']/following-sibling::li/a/text()").extract_first()
+        model=text("//*[normalize-space(text())='Model']/following-sibling::li/a/text()")
         if (model is None):
-            model=response.xpath("//*[normalize-space(text())='Model']/following-sibling::li/text()").extract_first()
+            model=text("//*[normalize-space(text())='Model']/following-sibling::li/text()")
 
         # Ad Location
-        location=response.xpath('//*[@id="scroll_car_info"]/p/a/text()').extract_first() 
+        location=text('//*[@id="scroll_car_info"]/p/a/text()')
 
         # mileage
-        mileage=response.xpath('//span[@class="engine-icon millage"]/../p/text()').extract_first()   
-        mileage=int(mileage.replace('km','').replace(',',''))
+        mileage=integer(text('//span[@class="engine-icon millage"]/../p/text()'))
 
         # Engine Type
-        engine_type=response.xpath('//span[@class="engine-icon type"]/../p/a/text()').extract_first()  
+        engine_type=text('//span[@class="engine-icon type"]/../p/a/text()')
 
 
         # Transmission
-        transmission=response.xpath('//span[@class="engine-icon transmission"]/../p/a/text()').extract_first() 
+        transmission=text('//span[@class="engine-icon transmission"]/../p/a/text()')
         if (transmission is None):
-            transmission=response.xpath('//span[@class="engine-icon transmission"]/../p/text()').extract_first() 
+            transmission=text('//span[@class="engine-icon transmission"]/../p/text()')
 
         # Registered City
-        register_city=response.xpath('//*[@id="scroll_car_detail"]/li[2]/text()').extract_first() 
+        register_city=text('//*[@id="scroll_car_detail"]/li[2]/text()')
 
         # Color
-        color=response.xpath("//*[contains(text(),'Color')]/following-sibling::li/text()").extract_first() 
+        color=text("//*[contains(text(),'Color')]/following-sibling::li/text()")
 
 
         # Assembly
-        assembly=response.xpath("//*[contains(text(),'Assembly')]/following-sibling::li/a/text()").extract_first() 
+        assembly=text("//*[contains(text(),'Assembly')]/following-sibling::li/a/text()")
         if (assembly!='Local') and (assembly!='Imported'):
-            assembly=response.xpath("//*[contains(text(),'Assembly')]/following-sibling::li/text()").extract_first() 
+            assembly=text("//*[contains(text(),'Assembly')]/following-sibling::li/text()")
 
 
         # Body Type
-        body_type=response.xpath("//*[contains(text(),'Body Type')]/following-sibling::li/a/text()").extract_first()          
+        body_type=text("//*[contains(text(),'Body Type')]/following-sibling::li/a/text()")
 
         # Engine Capacity 
-        capacity=response.xpath("//*[contains(text(),'Engine Capacity')]/following-sibling::li/text()").extract_first() 
+        capacity=integer(text("//*[contains(text(),'Engine Capacity')]/following-sibling::li/text()"))
 
         # last updated
-        updated=response.xpath("//*[contains(text(),'Last Updated')]/following-sibling::li/text()").extract_first()
+        updated=self.parse_updated_date(text("//*[contains(text(),'Last Updated')]/following-sibling::li/text()"))
 
         # Refrence Number
-        ref_no=response.xpath("//*[contains(text(),'Ad Ref #')]/following-sibling::li/text()").extract_first()
+        ref_no=text("//*[contains(text(),'Ad Ref #')]/following-sibling::li/text()")
+        if ref_no:
+            ref_no = re.sub(r'^\s*Ad\s*Ref\s*#?\s*', '', ref_no, flags=re.I).strip()
+        if not ref_no:
+            path = urlsplit(url).path.rstrip('/')
+            match = re.search(r'/(\d+)$', path)
+            ref_no = match.group(1) if match else None
+        if not ref_no or not url.strip():
+            raise DropItem('listing has neither a usable Ad Ref nor URL identifier')
 
 
         # Feature List
-        features=response.xpath('//ul[@class="list-unstyled car-feature-list nomargin"]/li/text()').extract()
-        features=','.join(features)
+        raw_features=response.xpath('//ul[@class="list-unstyled car-feature-list nomargin"]/li/text()').extract()
+        features=sorted({value.strip() for value in raw_features if value and value.strip()}, key=str.casefold)
 
 
-        yield {
-                "Ad No":    ref_no,
-                "Name":     name,
-                "Price":    price,
-                "Make":     make,
-                "Model":    model,
-                "Model Year": year,
-                "Location": location,
-                "Mileage": mileage,
-                "Registered City": register_city,
-                "Engine Type": engine_type,
-                "Engine Capacity": capacity,
-                "Transmission": transmission,
-                "Color": color,
-                "Assembly": assembly,
-                "Body Type": body_type,
-                "Features": features,
-                "Last Updated": updated,
-                "URL": url
-        }
+        yield PakwheelsItem(source_listing_id=ref_no, name=name, price_pkr=price,
+                make=make, model=model, model_year=year, location=location,
+                mileage_km=mileage, registered_city=register_city,
+                engine_type=engine_type, engine_capacity_cc=capacity,
+                transmission=transmission, color=color, assembly=assembly,
+                body_type=body_type, features=features,
+                source_updated_at=updated, url=url.strip())
+
+    @staticmethod
+    def parse_price(value, unit=None):
+        """Return a rounded integer PKR value without binary floating point."""
+        if value is None:
+            return None
+        combined = ' '.join(filter(None, (value, unit))).strip().lower()
+        match = re.search(r'(\d[\d,]*(?:\.\d+)?)', combined)
+        if not match:
+            return None
+        multiplier = Decimal(1)
+        if re.search(r'\b(?:lac|lacs|lakh|lakhs)\b', combined):
+            multiplier = Decimal(100000)
+        elif re.search(r'\bcrores?\b', combined):
+            multiplier = Decimal(10000000)
+        try:
+            amount = Decimal(match.group(1).replace(',', '')) * multiplier
+        except InvalidOperation:
+            return None
+        return int(amount.quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+
+    @staticmethod
+    def parse_updated_date(value):
+        if not value:
+            return None
+        cleaned = re.sub(r'^\s*Last Updated\s*:?', '', value, flags=re.I).strip()
+        for pattern in ('%b %d, %Y', '%B %d, %Y', '%d %b %Y', '%d %B %Y', '%Y-%m-%d'):
+            try:
+                return datetime.strptime(cleaned, pattern).date()
+            except ValueError:
+                continue
+        return None
