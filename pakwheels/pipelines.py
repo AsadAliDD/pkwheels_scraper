@@ -26,11 +26,12 @@ class PakwheelsPipeline:
     """Maintain current listings and append-only versions and price history."""
 
     def __init__(self, database_url, connect_timeout=10, max_retries=3,
-                 retry_delay=0.25, connect=psycopg.connect):
+                 retry_delay=0.25, connect=psycopg.connect, miss_threshold=3):
         self.database_url = database_url
         self.connect_timeout = connect_timeout
         self.max_retries = max(1, max_retries)
         self.retry_delay = max(0, retry_delay)
+        self.miss_threshold = max(2, miss_threshold)
         self.connect = connect
         self.connection = None
         self.run_id = None
@@ -48,6 +49,7 @@ class PakwheelsPipeline:
             settings.getint('DATABASE_CONNECT_TIMEOUT', 10),
             settings.getint('DATABASE_MAX_RETRIES', 3),
             settings.getfloat('DATABASE_RETRY_DELAY', 0.25),
+            miss_threshold=settings.getint('LISTING_INACTIVE_MISS_THRESHOLD', 3),
         )
 
     def open_spider(self, spider):
@@ -56,8 +58,10 @@ class PakwheelsPipeline:
         )
         with self.connection.cursor() as cursor:
             cursor.execute(
-                "INSERT INTO scrape_runs (spider_name, status) "
-                "VALUES (%s, 'running') RETURNING id", (spider.name,),
+                """INSERT INTO scrape_runs
+                   (spider_name, status, is_full_crawl, requested_pages)
+                   VALUES (%s, 'running', %s, %s) RETURNING id""",
+                (spider.name, spider.is_full_crawl, spider.requested_pages),
             )
             self.run_id = cursor.fetchone()[0]
         self.connection.commit()
@@ -130,7 +134,8 @@ class PakwheelsPipeline:
             if old_hash == content_hash:
                 cursor.execute(
                     """UPDATE listings SET last_seen_at=%s, last_seen_run_id=%s,
-                       url=%s, is_active=true, inactive_at=NULL WHERE id=%s""",
+                       url=%s, is_active=true, inactive_at=NULL,
+                       consecutive_misses=0 WHERE id=%s""",
                     (now, self.run_id, values['url'], listing_id),
                 )
                 return 'unchanged'
@@ -151,7 +156,7 @@ class PakwheelsPipeline:
             cursor.execute(
                 f"""UPDATE listings SET url=%s, {assignments}, last_seen_at=%s,
                     last_seen_run_id=%s, content_hash=%s, is_active=true,
-                    inactive_at=NULL WHERE id=%s""",
+                    inactive_at=NULL, consecutive_misses=0 WHERE id=%s""",
                 (values['url'], *field_values, now, self.run_id, content_hash,
                  listing_id),
             )
@@ -221,17 +226,51 @@ class PakwheelsPipeline:
         reason = getattr(spider, 'crawler', None)
         reason = getattr(getattr(reason, 'stats', None), 'get_value', lambda *a: None)(
             'finish_reason')
-        failed = bool(self.terminal_error) or reason not in (None, 'finished')
+        stats = getattr(getattr(spider, 'crawler', None), 'stats', None)
+        get_stat = getattr(stats, 'get_value', lambda key, default=0: default)
+        pages_scraped = get_stat('pages_scraped', 0) or 0
+        requests_failed = get_stat('requests_failed', 0) or 0
+        spider_exceptions = get_stat('spider_exceptions/count', 0) or 0
+        failed = (bool(self.terminal_error) or reason not in (None, 'finished')
+                  or bool(spider_exceptions) or requests_failed > 0)
+        complete = (not failed and spider.is_full_crawl and spider.crawl_complete
+                    and requests_failed == 0)
         try:
             with self.connection.cursor() as cursor:
                 cursor.execute(
                     """UPDATE scrape_runs SET finished_at=now(), status=%s,
                        items_seen=%s, items_inserted=%s, items_changed=%s,
+                       pages_scraped=%s, requests_failed=%s,
                        error_message=%s WHERE id=%s""",
                     ('failed' if failed else 'succeeded', self.items_seen,
-                     self.items_inserted, self.items_changed,
-                     self.terminal_error or (reason if failed else None), self.run_id),
+                     self.items_inserted, self.items_changed, pages_scraped,
+                     requests_failed,
+                     self.terminal_error or (reason if reason != 'finished' else None)
+                     or (f'{requests_failed} request(s) failed'
+                         if requests_failed else None)
+                     or (f'{spider_exceptions} spider exception(s)'
+                         if spider_exceptions else None),
+                     self.run_id),
                 )
+                if complete:
+                    self._reconcile_disappearances(cursor)
             self.connection.commit()
         finally:
             self.connection.close()
+
+    def _reconcile_disappearances(self, cursor):
+        """Advance misses only after a fully successful, unbounded crawl."""
+        cursor.execute(
+            """UPDATE listings
+               SET consecutive_misses = consecutive_misses + 1,
+                   is_active = CASE
+                       WHEN consecutive_misses + 1 >= %s THEN false
+                       ELSE is_active END,
+                   inactive_at = CASE
+                       WHEN consecutive_misses + 1 >= %s
+                           THEN COALESCE(inactive_at, now())
+                       ELSE inactive_at END
+               WHERE source = 'pakwheels'
+                 AND last_seen_run_id IS DISTINCT FROM %s""",
+            (self.miss_threshold, self.miss_threshold, self.run_id),
+        )

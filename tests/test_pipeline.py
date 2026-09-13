@@ -29,6 +29,74 @@ class Connection:
         self.rollbacks += 1
 
 
+class Cursor:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def execute(self, query, params):
+        self.connection.queries.append((query, params))
+
+
+class ClosingConnection(Connection):
+    def __init__(self):
+        super().__init__()
+        self.queries = []
+        self.closed = False
+
+    def cursor(self):
+        return Cursor(self)
+
+    def close(self):
+        self.closed = True
+
+
+class Stats:
+    def __init__(self, **values):
+        self.values = values
+
+    def get_value(self, key, default=None):
+        return self.values.get(key, default)
+
+
+class Spider:
+    name = 'pak1'
+
+    def __init__(self, *, full=True, complete=True, finish_reason='finished',
+                 pages_scraped=4, requests_failed=0):
+        self.is_full_crawl = full
+        self.requested_pages = None if full else pages_scraped
+        self.crawl_complete = complete
+        self.crawler = type('Crawler', (), {
+            'stats': Stats(finish_reason=finish_reason,
+                           pages_scraped=pages_scraped,
+                           requests_failed=requests_failed),
+        })()
+
+
+class ReconciliationPipeline(PakwheelsPipeline):
+    def __init__(self, listings, threshold=3):
+        super().__init__('unused', miss_threshold=threshold)
+        self.connection = ClosingConnection()
+        self.run_id = 10
+        self.listings = listings
+
+    def _reconcile_disappearances(self, cursor):
+        for listing in self.listings:
+            if listing['seen']:
+                listing['misses'] = 0
+                listing['active'] = True
+            else:
+                listing['misses'] += 1
+                if listing['misses'] >= self.miss_threshold:
+                    listing['active'] = False
+
+
 class MemoryPipeline(PakwheelsPipeline):
     """Exercise ingestion decisions without requiring a PostgreSQL server."""
 
@@ -119,3 +187,31 @@ def test_transaction_rolls_back_then_retries_transient_error(pipeline):
     assert pipeline.connection.rollbacks == 1
     assert pipeline.connection.commits == 1
     assert pipeline.items_inserted == 1
+
+
+@pytest.mark.parametrize('spider', [
+    Spider(full=False),
+    Spider(requests_failed=1),
+    Spider(finish_reason='shutdown'),
+])
+def test_incomplete_runs_never_advance_listing_misses(spider):
+    listing = {'seen': False, 'misses': 1, 'active': True}
+    pipeline = ReconciliationPipeline([listing], threshold=2)
+    pipeline.close_spider(spider)
+    assert listing == {'seen': False, 'misses': 1, 'active': True}
+
+
+def test_repeated_successful_full_crawls_deactivate_at_threshold():
+    listing = {'seen': False, 'misses': 0, 'active': True}
+    for run_id in (10, 11, 12):
+        pipeline = ReconciliationPipeline([listing], threshold=3)
+        pipeline.run_id = run_id
+        pipeline.close_spider(Spider())
+    assert listing == {'seen': False, 'misses': 3, 'active': False}
+
+
+def test_seen_listing_resets_misses_and_reactivates():
+    listing = {'seen': True, 'misses': 3, 'active': False}
+    pipeline = ReconciliationPipeline([listing])
+    pipeline.close_spider(Spider())
+    assert listing == {'seen': True, 'misses': 0, 'active': True}
