@@ -26,7 +26,8 @@ Scrapy based Ad scraper from https://www.pakwheels.com/
 
 ## Usage
 Use the `pages` spider argument to limit how many search-result pages are
-scraped. If it is omitted, the spider continues through all available pages.
+scraped. It must be a positive integer and includes the initial results page.
+If it is omitted, the spider continues through all available pages.
 Only an unbounded crawl that reaches the final results page without request or
 spider failures contributes to disappearance detection. A listing is marked
 inactive after three such crawls omit it (configurable with

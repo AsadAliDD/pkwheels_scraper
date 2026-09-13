@@ -16,22 +16,19 @@ class Pak1Spider(scrapy.Spider):
 
     def __init__(self, pages=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.is_full_crawl = pages is None
-        self.requested_pages = None
+        self.max_pages = self._parse_pages(pages)
+        self.is_full_crawl = self.max_pages is None
+        self.requested_pages = self.max_pages
         self.crawl_complete = False
 
+    @staticmethod
+    def _parse_pages(pages):
+        """Validate Scrapy's ``-a pages=...`` argument."""
         if pages is None:
-            self.max_pages = None
-            return
-
-        try:
-            self.max_pages = int(pages)
-        except (TypeError, ValueError):
-            raise ValueError('pages must be a positive integer') from None
-
-        if self.max_pages < 1:
+            return None
+        if isinstance(pages, bool) or not re.fullmatch(r'[1-9]\d*', str(pages).strip()):
             raise ValueError('pages must be a positive integer')
-        self.requested_pages = self.max_pages
+        return int(pages)
 
     def start_requests(self):
         for url in self.start_urls:
