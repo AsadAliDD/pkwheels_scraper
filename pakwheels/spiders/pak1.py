@@ -60,14 +60,6 @@ class Pak1Spider(scrapy.Spider):
         if (model is None):
             model=response.xpath("//*[normalize-space(text())='Model']/following-sibling::li/text()").extract_first()
 
-        # Variant (also called the version or trim)
-        variant=response.xpath(
-            "(//*[normalize-space(text())='Variant' or normalize-space(text())='Version']"
-            "/following-sibling::li[1]//text())[1]"
-        ).extract_first()
-        if (variant is None):
-            variant=self.variant_from_name(name, make, model, year)
-
         # Ad Location
         location=response.xpath('//*[@id="scroll_car_info"]/p/a/text()').extract_first() 
 
@@ -121,7 +113,6 @@ class Pak1Spider(scrapy.Spider):
                 "Price":    price,
                 "Make":     make,
                 "Model":    model,
-                "Variant":  variant,
                 "Model Year": year,
                 "Location": location,
                 "Mileage": mileage,
