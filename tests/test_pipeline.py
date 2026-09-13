@@ -1,6 +1,7 @@
 from copy import deepcopy
+import sqlite3
+from pathlib import Path
 
-from mysql.connector import errors as mysql_errors
 import pytest
 
 from pakwheels.pipelines import FIELDS, PakwheelsPipeline
@@ -98,7 +99,7 @@ class ReconciliationPipeline(PakwheelsPipeline):
 
 
 class MemoryPipeline(PakwheelsPipeline):
-    """Exercise ingestion decisions without requiring a MySQL server."""
+    """Exercise ingestion decisions independently of the SQLite schema."""
 
     def __init__(self):
         super().__init__('unused', max_retries=2, retry_delay=0)
@@ -111,7 +112,7 @@ class MemoryPipeline(PakwheelsPipeline):
     def _store(self, values):
         if self.fail_once:
             self.fail_once = False
-            raise mysql_errors.OperationalError('temporary failure')
+            raise sqlite3.OperationalError('database is locked')
         key = values['source_listing_id']
         digest = self.content_hash(values)
         old = self.rows.get(key)
@@ -217,18 +218,42 @@ def test_seen_listing_resets_misses_and_reactivates():
     assert listing == {'seen': True, 'misses': 0, 'active': True}
 
 
-def test_mysql_url_is_converted_to_connector_options():
-    assert PakwheelsPipeline._connection_config(
-        'mysql://scraper:p%40ss@localhost:3307/pakwheels?ssl_disabled=true'
-    ) == {
-        'host': 'localhost', 'port': 3307, 'database': 'pakwheels',
-        'charset': 'utf8mb4', 'user': 'scraper', 'password': 'p@ss',
-        'ssl_disabled': 'true',
-    }
+def test_sqlite_url_is_converted_to_an_absolute_path():
+    assert PakwheelsPipeline._database_path(
+        'sqlite:///tmp/pakwheels%20data.db'
+    ) == '/tmp/pakwheels data.db'
 
 
-def test_json_features_returned_by_mysql_are_normalized():
+def test_non_sqlite_url_is_rejected():
+    with pytest.raises(ValueError, match='sqlite'):
+        PakwheelsPipeline._database_path('mysql://localhost/pakwheels')
+
+
+def test_json_features_returned_by_sqlite_are_normalized():
     normalized = PakwheelsPipeline._normalize({
         **BASE_ITEM, 'features': '["Air Bags", "ABS"]',
     })
     assert normalized['features'] == ['ABS', 'Air Bags']
+
+
+def test_sqlite_schema_and_pipeline_persist_a_complete_run(tmp_path):
+    database = tmp_path / 'pakwheels.db'
+    migration = Path('db/migrations/001_create_listing_tables.sql').read_text()
+    with sqlite3.connect(database) as connection:
+        connection.executescript(migration)
+
+    spider = Spider()
+    pipeline = PakwheelsPipeline(f'sqlite:///{database}')
+    pipeline.open_spider(spider)
+    pipeline.process_item(BASE_ITEM, spider)
+    pipeline.close_spider(spider)
+
+    with sqlite3.connect(database) as connection:
+        listing = connection.execute(
+            'SELECT source_listing_id, features FROM listings'
+        ).fetchone()
+        run = connection.execute(
+            'SELECT status, items_seen, items_inserted FROM scrape_runs'
+        ).fetchone()
+    assert listing == ('42', '["ABS", "Air Bags"]')
+    assert run == ('succeeded', 1, 1)

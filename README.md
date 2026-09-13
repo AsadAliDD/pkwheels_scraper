@@ -53,23 +53,16 @@ absolute checkout path.
 
 ### Installation and database migration
 
-Install MySQL 8 locally, create a database and a least-privilege application
-user, then create the project-local virtual environment expected by the
-wrapper and apply the migrations in filename order:
+Install SQLite, create the project-local virtual environment expected by the
+wrapper, and initialize the database:
 
 ```sh
-sudo mysql <<'SQL'
-CREATE DATABASE pakwheels CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER 'scraper'@'localhost' IDENTIFIED BY 'choose-a-strong-password';
-GRANT SELECT, INSERT, UPDATE, DELETE ON pakwheels.* TO 'scraper'@'localhost';
-SQL
-
 cd /opt/pkwheels_scraper
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-for migration in db/migrations/*.sql; do
-    mysql --user=root --password pakwheels < "$migration" || exit 1
-done
+sudo install -d -o root -g root -m 0700 /var/lib/pakwheels
+sudo install -o root -g root -m 0600 /dev/null /var/lib/pakwheels/pakwheels.db
+sudo sqlite3 /var/lib/pakwheels/pakwheels.db < db/migrations/001_create_listing_tables.sql
 ```
 
 Migrations create the `scrape_runs`, `listings`, `listing_versions`, and
@@ -78,16 +71,17 @@ each migration should be applied exactly once.
 
 ### Environment and credentials
 
-`DATABASE_URL` is required. For a local server it has the form
-`mysql://scraper:password@localhost/pakwheels`. Percent-encode reserved URL
-characters in the username or password. Supply the URL through the service
-environment, or put it in `/etc/pakwheels-scraper.env`:
+`DATABASE_URL` is required and uses an absolute SQLite path, for example
+`sqlite:////var/lib/pakwheels/pakwheels.db`. Supply the URL through the service
+environment, or put it in `/etc/pakwheels-scraper.env`. The account running the
+scraper must be able to write both the database file and its parent directory
+(SQLite creates journal files beside the database):
 
 ```sh
 sudo install -o root -g root -m 0600 /dev/null /etc/pakwheels-scraper.env
 sudoedit /etc/pakwheels-scraper.env
 # Add one shell assignment; quote the value if it contains shell metacharacters:
-# DATABASE_URL='mysql://scraper:REDACTED@localhost/pakwheels'
+# DATABASE_URL='sqlite:////var/lib/pakwheels/pakwheels.db'
 ```
 
 The wrapper refuses a credentials file that is not root-owned or has any group
@@ -127,14 +121,13 @@ finished run in the last 14 hours (13 hours is a stricter alternative). For
 example, a monitoring check can run:
 
 ```sh
-mysql --batch --skip-column-names --user=scraper --password \
-  --host=localhost pakwheels --execute="SELECT CASE WHEN EXISTS (
+sqlite3 /var/lib/pakwheels/pakwheels.db "SELECT CASE WHEN EXISTS (
        SELECT 1 FROM scrape_runs
        WHERE status = 'succeeded'
-         AND finished_at >= UTC_TIMESTAMP() - INTERVAL 14 HOUR
-   ) THEN 'OK' ELSE 'CRITICAL: no successful scrape in 14 hours' END"
+         AND finished_at >= datetime('now', '-14 hours')
+   ) THEN 'OK' ELSE 'CRITICAL: no successful scrape in 14 hours' END;"
 ```
 
 Configure the monitor to alert unless the single output line is `OK` (and also
-on a non-zero `mysql` exit), so database outages and stale scrape schedules are
+on a non-zero `sqlite3` exit), so database errors and stale scrape schedules are
 both visible.
