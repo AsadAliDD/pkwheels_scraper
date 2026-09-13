@@ -7,6 +7,8 @@ Scrapy based Ad scraper from https://www.pakwheels.com/
 - Ad Ref No.
 - Name
 - Price
+- Make
+- Model
 - Model Year
 - Location
 - Mileage
