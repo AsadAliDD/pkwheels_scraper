@@ -1,92 +1,64 @@
+PRAGMA foreign_keys = ON;
+
 CREATE TABLE scrape_runs (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    spider_name VARCHAR(255) NOT NULL,
-    started_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    finished_at DATETIME(6),
-    status ENUM('running', 'succeeded', 'failed') NOT NULL,
-    items_seen INT NOT NULL DEFAULT 0,
-    items_inserted INT NOT NULL DEFAULT 0,
-    items_changed INT NOT NULL DEFAULT 0,
-    error_message TEXT
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    spider_name TEXT NOT NULL,
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TEXT,
+    status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+    items_seen INTEGER NOT NULL DEFAULT 0,
+    items_inserted INTEGER NOT NULL DEFAULT 0,
+    items_changed INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    is_full_crawl INTEGER NOT NULL DEFAULT 0 CHECK (is_full_crawl IN (0, 1)),
+    requested_pages INTEGER CHECK (requested_pages IS NULL OR requested_pages > 0),
+    pages_scraped INTEGER NOT NULL DEFAULT 0,
+    requests_failed INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE TABLE listings (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    source VARCHAR(100) NOT NULL DEFAULT 'pakwheels',
-    source_listing_id VARCHAR(255) NOT NULL,
-    url TEXT NOT NULL,
-    name TEXT,
-    price_pkr BIGINT,
-    make VARCHAR(255),
-    model VARCHAR(255),
-    model_year SMALLINT,
-    location VARCHAR(255),
-    mileage_km INT,
-    registered_city VARCHAR(255),
-    engine_type VARCHAR(100),
-    engine_capacity_cc INT,
-    transmission VARCHAR(100),
-    color VARCHAR(100),
-    assembly VARCHAR(100),
-    body_type VARCHAR(100),
-    features JSON NOT NULL,
-    source_updated_at DATE,
-    first_seen_at DATETIME(6) NOT NULL,
-    last_seen_at DATETIME(6) NOT NULL,
-    last_seen_run_id BIGINT UNSIGNED,
-    content_hash CHAR(64) NOT NULL,
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-    inactive_at DATETIME(6),
-    CONSTRAINT listings_source_listing_id_not_blank CHECK (TRIM(source_listing_id) <> ''),
-    CONSTRAINT listings_url_not_blank CHECK (TRIM(url) <> ''),
-    CONSTRAINT listings_source_source_listing_id_key UNIQUE (source, source_listing_id),
-    CONSTRAINT listings_last_seen_run_fk FOREIGN KEY (last_seen_run_id) REFERENCES scrape_runs(id),
-    INDEX listings_price_pkr_idx (price_pkr),
-    INDEX listings_make_model_model_year_idx (make, model, model_year),
-    INDEX listings_last_seen_at_idx (last_seen_at),
-    INDEX listings_active_idx (source, is_active, last_seen_at DESC)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL DEFAULT 'pakwheels',
+    source_listing_id TEXT NOT NULL CHECK (trim(source_listing_id) <> ''),
+    url TEXT NOT NULL CHECK (trim(url) <> ''),
+    name TEXT, price_pkr INTEGER, make TEXT, model TEXT, model_year INTEGER,
+    location TEXT, mileage_km INTEGER, registered_city TEXT, engine_type TEXT,
+    engine_capacity_cc INTEGER, transmission TEXT, color TEXT, assembly TEXT,
+    body_type TEXT, features TEXT NOT NULL, source_updated_at TEXT,
+    first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+    last_seen_run_id INTEGER REFERENCES scrape_runs(id),
+    content_hash TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 1,
+    inactive_at TEXT, consecutive_misses INTEGER NOT NULL DEFAULT 0
+        CHECK (consecutive_misses >= 0),
+    UNIQUE (source, source_listing_id)
+);
+
+CREATE INDEX listings_price_pkr_idx ON listings(price_pkr);
+CREATE INDEX listings_make_model_model_year_idx ON listings(make, model, model_year);
+CREATE INDEX listings_last_seen_at_idx ON listings(last_seen_at);
+CREATE INDEX listings_active_idx ON listings(source, is_active, last_seen_at DESC);
 
 CREATE TABLE listing_versions (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    listing_id BIGINT UNSIGNED NOT NULL,
-    scrape_run_id BIGINT UNSIGNED NOT NULL,
-    observed_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    url TEXT NOT NULL,
-    name TEXT,
-    price_pkr BIGINT,
-    make VARCHAR(255),
-    model VARCHAR(255),
-    model_year SMALLINT,
-    location VARCHAR(255),
-    mileage_km INT,
-    registered_city VARCHAR(255),
-    engine_type VARCHAR(100),
-    engine_capacity_cc INT,
-    transmission VARCHAR(100),
-    color VARCHAR(100),
-    assembly VARCHAR(100),
-    body_type VARCHAR(100),
-    features JSON NOT NULL,
-    source_updated_at DATE,
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-    inactive_at DATETIME(6),
-    content_hash CHAR(64) NOT NULL,
-    changed_fields JSON NOT NULL,
-    CONSTRAINT listing_versions_listing_fk FOREIGN KEY (listing_id) REFERENCES listings(id) ON DELETE CASCADE,
-    CONSTRAINT listing_versions_run_fk FOREIGN KEY (scrape_run_id) REFERENCES scrape_runs(id),
-    CONSTRAINT listing_versions_listing_id_content_hash_key UNIQUE (listing_id, content_hash)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    scrape_run_id INTEGER NOT NULL REFERENCES scrape_runs(id),
+    observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    url TEXT NOT NULL, name TEXT, price_pkr INTEGER, make TEXT, model TEXT,
+    model_year INTEGER, location TEXT, mileage_km INTEGER, registered_city TEXT,
+    engine_type TEXT, engine_capacity_cc INTEGER, transmission TEXT, color TEXT,
+    assembly TEXT, body_type TEXT, features TEXT NOT NULL, source_updated_at TEXT,
+    content_hash TEXT NOT NULL, changed_fields TEXT NOT NULL,
+    UNIQUE (listing_id, content_hash)
+);
 
 CREATE TABLE price_history (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    listing_id BIGINT UNSIGNED NOT NULL,
-    scrape_run_id BIGINT UNSIGNED NOT NULL,
-    observed_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    old_price_pkr BIGINT,
-    new_price_pkr BIGINT,
-    CONSTRAINT price_history_listing_fk FOREIGN KEY (listing_id) REFERENCES listings(id) ON DELETE CASCADE,
-    CONSTRAINT price_history_run_fk FOREIGN KEY (scrape_run_id) REFERENCES scrape_runs(id),
-    CONSTRAINT price_history_price_changed CHECK (NOT (old_price_pkr <=> new_price_pkr)),
-    INDEX price_history_listing_id_observed_at_idx (listing_id, observed_at DESC)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    scrape_run_id INTEGER NOT NULL REFERENCES scrape_runs(id),
+    observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    old_price_pkr INTEGER, new_price_pkr INTEGER,
+    CHECK (old_price_pkr IS NULL OR old_price_pkr IS NOT new_price_pkr)
+);
+
+CREATE INDEX price_history_listing_id_observed_at_idx
+    ON price_history(listing_id, observed_at DESC);

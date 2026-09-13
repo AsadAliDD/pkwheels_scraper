@@ -1,16 +1,16 @@
-"""Transactional MySQL persistence for PakWheels listings."""
+"""Transactional SQLite persistence for PakWheels listings."""
 
 import hashlib
 import json
 import os
+import sqlite3
 import time
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from urllib.parse import parse_qsl, unquote, urlparse
+from urllib.parse import unquote, urlparse
 
-import mysql.connector
 from itemadapter import ItemAdapter
-from mysql.connector import errors as mysql_errors
 from scrapy.exceptions import NotConfigured
 
 
@@ -27,7 +27,7 @@ class PakwheelsPipeline:
     """Maintain current listings and append-only versions and price history."""
 
     def __init__(self, database_url, connect_timeout=10, max_retries=3,
-                 retry_delay=0.25, connect=mysql.connector.connect, miss_threshold=3):
+                 retry_delay=0.25, connect=sqlite3.connect, miss_threshold=3):
         self.database_url = database_url
         self.connect_timeout = connect_timeout
         self.max_retries = max(1, max_retries)
@@ -54,15 +54,15 @@ class PakwheelsPipeline:
         )
 
     def open_spider(self, spider):
-        config = self._connection_config(self.database_url)
-        config['connection_timeout'] = self.connect_timeout
-        self.connection = self.connect(**config)
-        with self.connection.cursor() as cursor:
-            cursor.execute("SET time_zone = '+00:00'")
+        database = self._database_path(self.database_url)
+        self.connection = self.connect(database, timeout=self.connect_timeout)
+        self.connection.execute('PRAGMA foreign_keys = ON')
+        self.connection.execute(f'PRAGMA busy_timeout = {self.connect_timeout * 1000}')
+        with self._cursor() as cursor:
             cursor.execute(
                 """INSERT INTO scrape_runs
                    (spider_name, status, is_full_crawl, requested_pages)
-                   VALUES (%s, 'running', %s, %s)""",
+                   VALUES (?, 'running', ?, ?)""",
                 (spider.name, spider.is_full_crawl, spider.requested_pages),
             )
             self.run_id = cursor.lastrowid
@@ -83,7 +83,7 @@ class PakwheelsPipeline:
                 elif outcome == 'changed':
                     self.items_changed += 1
                 return item
-            except (mysql_errors.OperationalError, mysql_errors.InternalError) as error:
+            except sqlite3.OperationalError as error:
                 self.connection.rollback()
                 if not self._is_retryable(error):
                     self.terminal_error = str(error)
@@ -98,18 +98,18 @@ class PakwheelsPipeline:
                 raise
 
     def _store(self, values):
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat(
+            sep=' ', timespec='microseconds')
         content_hash = self.content_hash(values)
         columns = ', '.join(FIELDS)
-        placeholders = ', '.join(['%s'] * len(FIELDS))
+        placeholders = ', '.join(['?'] * len(FIELDS))
         field_values = self._db_field_values(values)
-        with self.connection.cursor() as cursor:
+        with self._cursor() as cursor:
             cursor.execute(
-                f"""INSERT INTO listings
+                f"""INSERT OR IGNORE INTO listings
                     (source, source_listing_id, url, {columns}, first_seen_at,
                      last_seen_at, last_seen_run_id, content_hash, is_active)
-                    VALUES ('pakwheels', %s, %s, {placeholders}, %s, %s, %s, %s, true)
-                    ON DUPLICATE KEY UPDATE id=id""",
+                    VALUES ('pakwheels', ?, ?, {placeholders}, ?, ?, ?, ?, 1)""",
                 (values['source_listing_id'], values['url'], *field_values,
                  now, now, self.run_id, content_hash),
             )
@@ -120,7 +120,7 @@ class PakwheelsPipeline:
                 cursor.execute(
                     """INSERT INTO price_history
                        (listing_id, scrape_run_id, observed_at, old_price_pkr, new_price_pkr)
-                       VALUES (%s, %s, %s, NULL, %s)""",
+                       VALUES (?, ?, ?, NULL, ?)""",
                     (listing_id, self.run_id, now, values['price_pkr']),
                 )
                 return 'inserted'
@@ -128,16 +128,16 @@ class PakwheelsPipeline:
             cursor.execute(
                 f"""SELECT id, content_hash, {columns}
                     FROM listings WHERE source = 'pakwheels'
-                    AND source_listing_id = %s FOR UPDATE""",
+                    AND source_listing_id = ?""",
                 (values['source_listing_id'],),
             )
             row = cursor.fetchone()
             listing_id, old_hash = row[0], row[1]
             if old_hash == content_hash:
                 cursor.execute(
-                    """UPDATE listings SET last_seen_at=%s, last_seen_run_id=%s,
-                       url=%s, is_active=true, inactive_at=NULL,
-                       consecutive_misses=0 WHERE id=%s""",
+                    """UPDATE listings SET last_seen_at=?, last_seen_run_id=?,
+                       url=?, is_active=1, inactive_at=NULL,
+                       consecutive_misses=0 WHERE id=?""",
                     (now, self.run_id, values['url'], listing_id),
                 )
                 return 'unchanged'
@@ -151,14 +151,14 @@ class PakwheelsPipeline:
                 cursor.execute(
                     """INSERT INTO price_history
                        (listing_id, scrape_run_id, observed_at, old_price_pkr, new_price_pkr)
-                       VALUES (%s, %s, %s, %s, %s)""",
+                       VALUES (?, ?, ?, ?, ?)""",
                     (listing_id, self.run_id, now, old['price_pkr'], values['price_pkr']),
                 )
-            assignments = ', '.join(f'{field}=%s' for field in FIELDS)
+            assignments = ', '.join(f'{field}=?' for field in FIELDS)
             cursor.execute(
-                f"""UPDATE listings SET url=%s, {assignments}, last_seen_at=%s,
-                    last_seen_run_id=%s, content_hash=%s, is_active=true,
-                    inactive_at=NULL, consecutive_misses=0 WHERE id=%s""",
+                f"""UPDATE listings SET url=?, {assignments}, last_seen_at=?,
+                    last_seen_run_id=?, content_hash=?, is_active=1,
+                    inactive_at=NULL, consecutive_misses=0 WHERE id=?""",
                 (values['url'], *field_values, now, self.run_id, content_hash,
                  listing_id),
             )
@@ -167,13 +167,13 @@ class PakwheelsPipeline:
     def _insert_version(self, cursor, listing_id, values, content_hash,
                         changed_fields, observed_at):
         columns = ', '.join(FIELDS)
-        placeholders = ', '.join(['%s'] * len(FIELDS))
+        placeholders = ', '.join(['?'] * len(FIELDS))
         cursor.execute(
             f"""INSERT INTO listing_versions
                 (listing_id, scrape_run_id, observed_at, url, {columns},
                  content_hash, changed_fields)
-                VALUES (%s, %s, %s, %s, {placeholders}, %s, %s)
-                ON DUPLICATE KEY UPDATE id=id""",
+                VALUES (?, ?, ?, ?, {placeholders}, ?, ?)
+                ON CONFLICT(listing_id, content_hash) DO NOTHING""",
             (listing_id, self.run_id, observed_at, values['url'],
              *self._db_field_values(values), content_hash,
              json.dumps(changed_fields, ensure_ascii=False)),
@@ -224,33 +224,38 @@ class PakwheelsPipeline:
 
     @staticmethod
     def _db_field_values(values):
-        return tuple(json.dumps(values[field], ensure_ascii=False)
-                     if field == 'features' else values[field]
-                     for field in FIELDS)
+        return tuple(
+            json.dumps(values[field], ensure_ascii=False)
+            if field == 'features'
+            else values[field].isoformat()
+            if isinstance(values[field], date)
+            else values[field]
+            for field in FIELDS
+        )
 
     @staticmethod
-    def _connection_config(database_url):
+    def _database_path(database_url):
         parsed = urlparse(database_url)
-        if parsed.scheme not in ('mysql', 'mysql+mysqlconnector'):
-            raise ValueError('DATABASE_URL must use the mysql:// scheme')
-        if not parsed.hostname or not parsed.path.strip('/'):
-            raise ValueError('DATABASE_URL must include a host and database name')
-        config = {
-            'host': parsed.hostname,
-            'port': parsed.port or 3306,
-            'database': unquote(parsed.path.lstrip('/')),
-            'charset': 'utf8mb4',
-        }
-        if parsed.username is not None:
-            config['user'] = unquote(parsed.username)
-        if parsed.password is not None:
-            config['password'] = unquote(parsed.password)
-        config.update(dict(parse_qsl(parsed.query)))
-        return config
+        if parsed.scheme != 'sqlite':
+            raise ValueError('DATABASE_URL must use the sqlite:/// scheme')
+        if parsed.netloc not in ('', 'localhost') or not parsed.path:
+            raise ValueError('DATABASE_URL must contain a SQLite database path')
+        path = unquote(parsed.path)
+        return ':memory:' if path == '/:memory:' else os.path.abspath(path)
 
     @staticmethod
     def _is_retryable(error):
-        return getattr(error, 'errno', None) in (None, 1205, 1213)
+        return 'locked' in str(error).lower() or 'busy' in str(error).lower()
+
+    @contextmanager
+    def _cursor(self):
+        cursor = self.connection.cursor()
+        try:
+            yield cursor
+        finally:
+            close = getattr(cursor, 'close', None)
+            if close:
+                close()
 
     def close_spider(self, spider):
         if self.connection is None:
@@ -268,12 +273,12 @@ class PakwheelsPipeline:
         complete = (not failed and spider.is_full_crawl and spider.crawl_complete
                     and requests_failed == 0)
         try:
-            with self.connection.cursor() as cursor:
+            with self._cursor() as cursor:
                 cursor.execute(
-                    """UPDATE scrape_runs SET finished_at=now(), status=%s,
-                       items_seen=%s, items_inserted=%s, items_changed=%s,
-                       pages_scraped=%s, requests_failed=%s,
-                       error_message=%s WHERE id=%s""",
+                    """UPDATE scrape_runs SET finished_at=CURRENT_TIMESTAMP, status=?,
+                       items_seen=?, items_inserted=?, items_changed=?,
+                       pages_scraped=?, requests_failed=?,
+                       error_message=? WHERE id=?""",
                     ('failed' if failed else 'succeeded', self.items_seen,
                      self.items_inserted, self.items_changed, pages_scraped,
                      requests_failed,
@@ -296,13 +301,13 @@ class PakwheelsPipeline:
             """UPDATE listings
                SET consecutive_misses = consecutive_misses + 1,
                    is_active = CASE
-                       WHEN consecutive_misses + 1 >= %s THEN false
+                       WHEN consecutive_misses + 1 >= ? THEN 0
                        ELSE is_active END,
                    inactive_at = CASE
-                       WHEN consecutive_misses + 1 >= %s
-                           THEN COALESCE(inactive_at, now())
+                       WHEN consecutive_misses + 1 >= ?
+                           THEN COALESCE(inactive_at, CURRENT_TIMESTAMP)
                        ELSE inactive_at END
                WHERE source = 'pakwheels'
-                 AND NOT (last_seen_run_id <=> %s)""",
+                 AND last_seen_run_id IS NOT ?""",
             (self.miss_threshold, self.miss_threshold, self.run_id),
         )
